@@ -13,6 +13,7 @@
 library(tidyverse)
 library(lubridate)
 library(sf)
+library(mapview)
 ```
 
 Primero descargamos datos de los viajes realizados en el sistema de transporte metropolitano en Montevideo, como el archivo es grande lo descargamos y descomprimimos directamente de la pagina del catalogo de datos abiertos
@@ -25,6 +26,32 @@ unlink(temp)
 ```
 
 Cargamos Shapefiles con recorridos de los omnibus, paradas y Zonas censales para contextualizar geograficamente los datos previos dado que no se cuenta en los mismos con un x e y
+
+```{r}
+zonas_censales <- st_read("data/censo/ine_seg_11.shp")
+paradas <- st_read("data/paradas_shp/v_uptu_paradas.shp")
+recorridos <- st_read("data/recorridos/v_uptu_lsv.shp")
+recorridos_no_maximales <- st_read("data/recorridos_no_maximales/uptu_variante_no_maximal.shp")
+```
+
+Corregimos crs y cambiamos todos para trabajar unicamente en CRS = 4326
+
+```{r}
+zonas_censales <- zonas_censales %>%
+  st_set_crs(32721) %>%
+  st_transform(4326)
+
+paradas <- paradas %>%
+  st_transform(4326)
+
+recorridos <- recorridos %>%
+  st_transform(4326)
+
+recorridos_no_maximales <- recorridos_no_maximales %>%
+  st_transform(4326)
+```
+
+Filtramos los datos de las zonas censales para unicamente trabajar con los datos del departamento de Montevideo
 
 ```{r}
 
