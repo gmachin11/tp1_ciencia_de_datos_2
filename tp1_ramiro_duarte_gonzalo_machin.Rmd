@@ -14,9 +14,14 @@ library(tidyverse)
 library(lubridate)
 library(sf)
 library(mapview)
+library(maptools)
+library(ggrepel)
+library(patchwork)
 ```
 
-Primero descargamos datos de los viajes realizados en el sistema de transporte metropolitano en Montevideo, como el archivo es grande lo descargamos y descomprimimos directamente de la pagina del catalogo de datos abiertos
+### Dataset de Viajes
+
+Primero descargamos datos de los viajes realizados en el sistema de transporte metropolitano (STM) en Montevideo, como el archivo es grande lo descargamos y descomprimimos directamente de la pagina del catalogo de datos abiertos
 
 ```{r}
 temp <- tempfile()
@@ -25,14 +30,18 @@ datos_julio <- read.csv(unz(temp, "viajes_stm_072022.csv"))
 unlink(temp)
 ```
 
+### SHPs a Utilizar
+
 Cargamos Shapefiles con recorridos de los omnibus, paradas y Zonas censales para contextualizar geograficamente los datos previos dado que no se cuenta en los mismos con un x e y
 
 ```{r}
 zonas_censales <- st_read("data/censo/ine_seg_11.shp")
-paradas <- st_read("data/paradas_shp/v_uptu_paradas.shp")
+paradas <- st_read("data/paradas_shp/v_uptu_paradas.shp", options = "ENCODING=UTF-8")
 recorridos <- st_read("data/recorridos/v_uptu_lsv.shp")
 recorridos_no_maximales <- st_read("data/recorridos_no_maximales/uptu_variante_no_maximal.shp")
 ```
+
+### Correcion de Datos
 
 Corregimos crs y cambiamos todos para trabajar unicamente en CRS = 4326
 
@@ -54,6 +63,146 @@ recorridos_no_maximales <- recorridos_no_maximales %>%
 Filtramos los datos de las zonas censales para unicamente trabajar con los datos del departamento de Montevideo
 
 ```{r}
-
+zonas_censales <- zonas_censales %>%
+  filter(NOMBDEPTO == "MONTEVIDEO")
 ```
 
+### Visualizacion de Datos Espaciales
+
+Observamos los datos geograficos al momento
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales)+
+  geom_sf(data = recorridos)+
+  geom_sf(data = recorridos_no_maximales)+
+  geom_sf(data = paradas)+
+  theme_bw()
+```
+
+Observamos que el STM tiene alcance mas alla de las fronteras del departamento, pero en este trabajo unicamente utilizaremos aquellas paradas que estan dentro del departamento, para esto hacemos un spatial join para poder filtrar las paradas que no estan en el departamento y tambien asignarles el codigo de la zona censal dentro de la que pertenecen, asi podemos empezar a trabajar con los datos de transporte publico dentro de cada zona censal.
+
+#### Flitro de zonas y paradas a utilizar
+
+```{r}
+sf_use_s2(FALSE)
+
+paradas <- paradas %>%
+  st_make_valid() %>%
+  st_join(zonas_censales)
+
+paradas <- paradas %>%
+  filter(!is.na(CODSEG))
+```
+
+Observamos los datos de las secciones censales para ver en que nivel de detalle analizamos su subdivision
+
+```{r}
+head(zonas_censales)
+
+zonas_censales <- zonas_censales %>%
+  mutate(CODSEC = as.factor(CODSEC))
+```
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales,aes(fill=CODSEC))+
+  labs(title = "Secciones Departamentles",
+       y="Latitud",
+       x="Longitud",
+       legend="Seccion",
+       caption="Fuente: INE")+
+  theme_bw()
+```
+
+Observamos que tiene 3 niveles de subdivision, el departamento, la seccion y el segmento. como el departamento solo usaremos uno observaremos el nivel de detalle de cada seccion para observar si con este nivel es suficiente para sacar conclusiones geograficas o es necesario ir un nivel mas abajo y analiza por segmento censal
+
+### Cramos un nuevo SF de poligonos por zonas Censales para facilitar el analisis
+
+```{r}
+zonas_censales_CODSEC <- zonas_censales %>%
+  group_by(CODSEC) %>%
+  summarise()
+```
+
+### Alcance espacial
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC,aes(fill=CODSEC))+
+  geom_rect(aes(xmin = -56.235, xmax = -56.11, ymin = -34.85, ymax = -34.94), color = "red", fill = NA)+
+  labs(title = "Secciones Departamentles",
+       y="Latitud",
+       x="Longitud",
+       legend="Seccion",
+       caption="Fuente: INE")+
+  theme_bw()
+```
+
+Para facilitar el calculo y el manejo de 22 millones de datos utilizaremos group by y summarise para resumir el dataset y poder graficar los datos por zona censal
+
+```{r}
+datos_julio_resumido <- datos_julio %>%
+  group_by(codigo_parada_origen,
+           sevar_codigo,
+           dsc_linea) %>%
+  summarise(Total = sum(cantidad_pasajeros)) %>%
+  rename(COD_UBIC_P = codigo_parada_origen) %>%
+  mutate(parada_linea = paste(dsc_linea,sevar_codigo,COD_UBIC_P,sep="_")) %>%
+  select(parada_linea,
+         Total)
+
+paradas <- paradas %>%
+  mutate(parada_linea = paste(DESC_LINEA,COD_VARIAN,COD_UBIC_P,sep="_"))
+```
+
+### unimos el dataset resumido al de paradas y zonas censales para poder graficarlos
+
+```{r}
+paradas <- paradas %>%
+  left_join(datos_julio_resumido,by = "parada_linea") %>%
+  mutate_each(funs(replace(., which(is.na(.)), 0))) %>%
+  mutate(CODSEC = as.character(CODSEC))
+```
+
+### Graficamos el total de boletos vendidos por seccion
+
+```{r}
+ggplot(paradas %>%
+         st_set_geometry(NULL) %>%
+         group_by(CODSEC) %>%
+         summarise(Total = sum(Total)))+
+  geom_bar(aes(y=reorder(CODSEC,(Total)),weight = Total),fill = "#60E6C8")+
+  labs(title="Total de Viajes Vendidos por Seccion Departamental",
+       y="Seccion",
+       x="Total",
+       caption="Fuente: STM")+
+  theme_bw()
+```
+
+Observamos que las secciones 110 y 111 son las dos que mas viajes vendidos tienen, ahora observamos espacialmente
+
+```{r}
+viajes_por_seccion <- paradas %>%
+  st_set_geometry(NULL) %>%
+  group_by(CODSEC) %>%
+  summarise(Total = sum(Total))
+
+zonas_censales_CODSEC <- left_join(zonas_censales_CODSEC,viajes_por_seccion,by = "CODSEC")
+```
+
+### Mapa del Total por Seccion Censal
+
+```{r}
+ggplot()+
+  geom_sf(data = zonas_censales_CODSEC,aes(fill=Total))+
+  scale_fill_gradient(low = "#FDFF62",high = "#FF6262")+
+  labs(title = "Total de Viajes Vendidos por Zona Censal",
+       x = "Longitud",
+       y = "Latitud",
+       legend = "Viajes Vendidos",
+       caption = "Fuente: STM")+
+  theme_bw()
+```
+
+Se puede observar que la zona sureste de la ciudad es la seccion con mas viajes vendidos, superando los dos millones de viajes en el mes de Julio 2022, para concluir aun mas sobre estas zonas se puede hacer mas hincapie en relacion a la poblacion y puestos de trabajo en cada zona censal, pero sobre esto se indagara en los proximos trabajos practicos.
